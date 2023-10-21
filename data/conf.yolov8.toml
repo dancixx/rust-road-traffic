@@ -1,4 +1,5 @@
 [input]
+    # video_src = "rtmp://127.0.0.1:1935/live/raw"
     video_src = "./data/demo.mp4"
     # Use string below for usage with CSI camera (where sensor-id is camera indentifier)
     # video_src = "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM), width=(int)1280, height=(int)720, format=(string)NV12, framerate=(fraction)30/1 ! nvvidconv flip-method=0 ! video/x-raw, width=(int)1280, height=(int)720, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink"
@@ -21,13 +22,11 @@
     window_name = "Toy GUI"
 
 [detection]
-    # Vehicles-only YOLOv3-tiny:
-    network_weights = "./data/tinyv3-vehicles_best.weights"
-    network_cfg = "./data/tinyv3-vehicles.cfg"
+    model = "./data/yolov8n.onnx"
     conf_threshold = 0.4
     nms_threshold = 0.2
-    net_width = 416
-    net_height = 416
+    net_width = 640
+    net_height = 640
     # Vehicles-only classes
     net_classes = ["car", "motorbike", "bus", "truck"]
     # Default COCO classes
@@ -65,7 +64,7 @@
 
 [worker]
     reset_data_milliseconds = 30000
-    
+
 [rest_api]
     enable = true
     host = "0.0.0.0"

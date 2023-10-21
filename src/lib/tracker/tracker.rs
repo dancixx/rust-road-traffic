@@ -1,13 +1,8 @@
-use std::error::Error;
+use mot_rs::mot::IoUTracker;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
-use std::collections::hash_map::Entry::{
-    Occupied,
-    Vacant
-};
+use std::error::Error;
 use uuid::Uuid;
-use mot_rs::mot::{
-    IoUTracker
-};
 
 use crate::lib::detection::Detections;
 use crate::lib::spatial::haversine;
@@ -48,7 +43,7 @@ pub struct SpatialInfo {
 }
 
 impl SpatialInfo {
-    pub fn new(_time: f32,  _x: f32, _y: f32, _x_projected: f32, _y_projected: f32) -> Self {
+    pub fn new(_time: f32, _x: f32, _y: f32, _x_projected: f32, _y_projected: f32) -> Self {
         Self {
             first_time: _time,
             first_x_projected: _x_projected,
@@ -82,9 +77,19 @@ impl SpatialInfo {
     }
     // Same as update(), but calculations are done between first and last points
     // This approach helps to avoid situation when distance between two points is approx. 0
-    pub fn update_avg(&mut self, _time: f32, _x: f32, _y: f32, _x_projected: f32, _y_projected: f32, pixels_per_meter: f32) {
+    pub fn update_avg(
+        &mut self,
+        _time: f32,
+        _x: f32,
+        _y: f32,
+        _x_projected: f32,
+        _y_projected: f32,
+        pixels_per_meter: f32,
+    ) {
         // It is possible to calculate speed between two points (old and new)
-        let distance_pixels = ((_x_projected - self.first_x_projected).powi(2) + (_y_projected - self.first_y_projected).powi(2)).sqrt();
+        let distance_pixels = ((_x_projected - self.first_x_projected).powi(2)
+            + (_y_projected - self.first_y_projected).powi(2))
+        .sqrt();
         let distance_meters = distance_pixels / pixels_per_meter;
         let time_diff = (_time - self.first_time).abs();
         let velocity = distance_meters / time_diff; // meters per second
@@ -95,9 +100,19 @@ impl SpatialInfo {
         self.last_x_projected = _x_projected;
         self.last_y_projected = _y_projected;
     }
-    pub fn update(&mut self, _time: f32, _x: f32, _y: f32, _x_projected: f32, _y_projected: f32, pixels_per_meter: f32) {
+    pub fn update(
+        &mut self,
+        _time: f32,
+        _x: f32,
+        _y: f32,
+        _x_projected: f32,
+        _y_projected: f32,
+        pixels_per_meter: f32,
+    ) {
         // It is possible to calculate speed between two points (old and new)
-        let distance_pixels = ((_x_projected - self.last_x_projected).powi(2) + (_y_projected - self.last_y_projected).powi(2)).sqrt();
+        let distance_pixels = ((_x_projected - self.last_x_projected).powi(2)
+            + (_y_projected - self.last_y_projected).powi(2))
+        .sqrt();
         let distance_meters = distance_pixels / pixels_per_meter;
         let time_diff = _time - self.last_time;
         let velocity = distance_meters / time_diff; // meters per second
@@ -116,7 +131,7 @@ impl SpatialInfo {
         let velocity = distance / time_diff; // meters per second
         self.distance_traveled = distance;
         self.speed = velocity * 3.6; // convert m/s to km/h
-        
+
         self.last_time = _time;
         self.last_lon = _lon;
         self.last_lat = _lat;
@@ -131,13 +146,14 @@ impl Tracker {
             objects_extra: HashMap::new(),
         }
     }
-    pub fn match_objects(&mut self, detections: &mut Detections, current_second: f32) -> Result<(), Box<dyn Error>>{
+    pub fn match_objects(
+        &mut self,
+        detections: &mut Detections,
+        current_second: f32,
+    ) -> Result<(), Box<dyn Error>> {
         match self.engine.match_objects(&mut detections.blobs) {
-            Ok(_) => {
-            }
-            Err(err) => {
-                return Err(err)
-            },
+            Ok(_) => {}
+            Err(err) => return Err(err),
         }
 
         // println!("id;times");
@@ -178,7 +194,7 @@ impl Tracker {
                     let mut object_extra = ObjectExtra {
                         class_name: detections.class_names[idx].to_owned(),
                         confidence: detections.confidences[idx],
-                        times:  Vec::with_capacity(detection.get_max_track_len()),
+                        times: Vec::with_capacity(detection.get_max_track_len()),
                         estimated_velocity: -1.0,
                         spatial_info: None,
                     };
@@ -196,7 +212,6 @@ impl Tracker {
                     entry.insert(object_extra);
                 }
             }
-            
         }
 
         // Remove obsolete objects
@@ -205,7 +220,7 @@ impl Tracker {
             let save = ref_engine_objects.contains_key(object_id);
             save
         });
-        Ok(())        
+        Ok(())
     }
 }
 

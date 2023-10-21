@@ -1,13 +1,6 @@
-use opencv::{
-    core::Mat,
-};
-
-use chrono::{
-    DateTime,
-    Utc
-};
+use opencv::core::Mat;
 
 pub struct ThreadedFrame {
     pub frame: Mat,
-    pub current_second: f32
+    pub current_second: f32,
 }

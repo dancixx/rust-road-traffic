@@ -19,3 +19,12 @@
 /.vscode
 data/MobileNetSSD_deploy.caffemodel
 data/MobileNetSSD_deploy.prototxt
+
+venv
+yolo*
+
+ultralytics
+
+live
+*.mp4
+*.weights

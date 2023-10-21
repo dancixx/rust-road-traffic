@@ -1,77 +1,50 @@
 use chrono::Utc;
+use opencv::dnn::read_net_from_onnx;
 use opencv::{
-    prelude::*,
-    core::Scalar,
-    core::Size,
-    core::Mat,
-    core::Vector,
-    core::get_cuda_enabled_device_count,
-    core::CV_32F,
-    highgui::named_window,
-    highgui::resize_window,
-    highgui::imshow,
-    highgui::wait_key,
+    core::get_cuda_enabled_device_count, core::Mat, core::Scalar, core::Size, core::Vector,
+    core::CV_32F, dnn::blob_from_image, dnn::read_net, dnn::Net, dnn::DNN_BACKEND_CUDA,
+    dnn::DNN_TARGET_CUDA, highgui::imshow, highgui::named_window, highgui::resize_window,
+    highgui::wait_key, imgcodecs::imencode, imgproc::resize, prelude::*, videoio::get_backends,
     videoio::VideoCapture,
-    videoio::get_backends,
-    imgproc::resize,
-    imgcodecs::imencode,
-    dnn::DNN_BACKEND_CUDA,
-    dnn::DNN_TARGET_CUDA,
-    dnn::Net,
-    dnn::read_net,
-    dnn::blob_from_image,
 };
 
 mod lib;
-use lib::data_storage::{
-    new_datastorage,
-};
+use lib::data_storage::new_datastorage;
+use lib::detection::process_yolo_detections;
 use lib::draw;
-use lib::tracker::{
-    Tracker,
-    SpatialInfo
-};
-use lib::detection::{
-    process_yolo_detections
-};
+use lib::tracker::{SpatialInfo, Tracker};
 use lib::zones::Zone;
 
 mod settings;
-use settings::{
-    AppSettings,
-};
+use settings::AppSettings;
 
 mod video_capture;
-use video_capture::{
-    get_video_capture,
-    ThreadedFrame
-};
+use video_capture::{get_video_capture, ThreadedFrame};
 
-use lib::publisher::{
-    RedisConnection
-};
+use lib::publisher::RedisConnection;
 
 use lib::rest_api;
 
-use std::env;
-use std::time::Duration as STDDuration;
-use std::time::{SystemTime};
-use std::process;
-use std::time::Instant;
-use std::io::Write;
-use std::thread;
-use std::sync::{Arc, RwLock, mpsc};
-use std::error::Error;
-use std::error;
-use std::fmt;
 use ctrlc;
+use std::env;
+use std::error;
+use std::error::Error;
+use std::fmt;
+use std::io::Write;
+use std::process;
+use std::sync::{mpsc, Arc, RwLock};
+use std::thread;
+use std::time::Duration as STDDuration;
+use std::time::Instant;
+use std::time::SystemTime;
 
-use crate::lib::spatial::meters_to_lonlat;
 use crate::lib::spatial::lonlat_to_meters;
+use crate::lib::spatial::meters_to_lonlat;
 use crate::lib::{data_storage, zones};
 
 const VIDEOCAPTURE_POS_MSEC: i32 = 0;
-const COCO_FILTERED_CLASSNAMES: &'static [&'static str] = &["car", "motorbike", "bus", "train", "truck"];
+const COCO_FILTERED_CLASSNAMES: &'static [&'static str] =
+    &["car", "motorbike", "bus", "train", "truck"];
 const BLOB_SCALE: f64 = 1.0 / 255.0;
 const BLOB_NAME: &'static str = "";
 const EMPTY_FRAMES_LIMIT: u16 = 60;
@@ -84,13 +57,15 @@ fn get_sys_time_in_secs() -> u64 {
 }
 
 #[derive(Debug)]
-struct AppVideoError{typ: i16}
+struct AppVideoError {
+    typ: i16,
+}
 impl fmt::Display for AppVideoError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.typ {
             1 => write!(f, "Can't open video"),
             2 => write!(f, "Can't make probe for video"),
-            _ => write!(f, "Undefined application video error")
+            _ => write!(f, "Undefined application video error"),
         }
     }
 }
@@ -122,7 +97,7 @@ impl From<opencv::Error> for AppError {
     }
 }
 
-fn probe_video(capture: &mut VideoCapture) ->  Result<(f32, f32, f32), AppError> {
+fn probe_video(capture: &mut VideoCapture) -> Result<(f32, f32, f32), AppError> {
     let fps = capture.get(opencv::videoio::CAP_PROP_FPS)? as f32;
     let frame_cols = capture.get(opencv::videoio::CAP_PROP_FRAME_WIDTH)? as f32;
     let frame_rows = capture.get(opencv::videoio::CAP_PROP_FRAME_HEIGHT)? as f32;
@@ -140,33 +115,41 @@ fn probe_video(capture: &mut VideoCapture) ->  Result<(f32, f32, f32), AppError>
     return Ok((frame_cols, frame_rows, fps));
 }
 
-fn prepare_neural_net(weights: &str, configuration: &str) -> Result<(Net, Vector<String>), AppError> {
-    let mut neural_net = match read_net(weights, configuration, "Darknet"){
-        Ok(result) => result,
-        Err(err) => {
-            panic!("Can't read network '{}' (with cfg '{}') due the error: {:?}", weights, configuration, err);
-        }
-    };
+fn prepare_neural_net(model: &str) -> Result<(Net, Vector<String>), AppError> {
+    let mut neural_net = read_net_from_onnx(model)?;
 
     let out_layers_names = neural_net.get_unconnected_out_layers_names()?;
 
     /* Check if CUDA is an option at all */
     let cuda_count = get_cuda_enabled_device_count()?;
     let cuda_available = cuda_count > 0;
-    println!("CUDA is {}", if cuda_available { "'available'" } else { "'not available'" });
+    println!(
+        "CUDA is {}",
+        if cuda_available {
+            "'available'"
+        } else {
+            "'not available'"
+        }
+    );
 
     // Initialize CUDA back-end if possible
     if cuda_available {
-        match neural_net.set_preferable_backend(DNN_BACKEND_CUDA){
-            Ok(_) => {},
+        match neural_net.set_preferable_backend(DNN_BACKEND_CUDA) {
+            Ok(_) => {}
             Err(err) => {
-                panic!("Can't set DNN_BACKEND_CUDA for neural network due the error {:?}", err);
+                panic!(
+                    "Can't set DNN_BACKEND_CUDA for neural network due the error {:?}",
+                    err
+                );
             }
         }
-        match neural_net.set_preferable_target(DNN_TARGET_CUDA){
-            Ok(_) => {},
+        match neural_net.set_preferable_target(DNN_TARGET_CUDA) {
+            Ok(_) => {}
             Err(err) => {
-                panic!("Can't set DNN_TARGET_CUDA for neural network due the error {:?}", err);
+                panic!(
+                    "Can't set DNN_TARGET_CUDA for neural network due the error {:?}",
+                    err
+                );
             }
         }
     }
@@ -174,14 +157,21 @@ fn prepare_neural_net(weights: &str, configuration: &str) -> Result<(Net, Vector
     Ok((neural_net, out_layers_names))
 }
 
-fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neural_net: &mut Net, neural_net_out_layers: Vector<String>, verbose: bool) -> Result<(), AppError> {
+fn run(
+    settings: &AppSettings,
+    path_to_config: &str,
+    tracker: &mut Tracker,
+    neural_net: &mut Net,
+    neural_net_out_layers: Vector<String>,
+    verbose: bool,
+) -> Result<(), AppError> {
     println!("Verbose is '{}'", verbose);
     println!("REST API is '{}'", settings.rest_api.enable);
     println!("Redis publisher is '{}'", settings.redis_publisher.enable);
 
     let enable_mjpeg = match &settings.rest_api.mjpeg_streaming {
-        Some(v) => { v.enable & settings.rest_api.enable} // Logical 'And' to prevent MJPEG when API is disabled
-        None => { false }
+        Some(v) => v.enable & settings.rest_api.enable, // Logical 'And' to prevent MJPEG when API is disabled
+        None => false,
     };
 
     println!("MJPEG is '{}'", enable_mjpeg);
@@ -190,19 +180,19 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
     let data_storage = new_datastorage(settings.equipment_info.id.clone(), verbose);
 
     let scale_x = match settings.input.scale_x {
-        Some(x) => { x },
-        None => { 1.0 }
+        Some(x) => x,
+        None => 1.0,
     };
     let scale_y = match settings.input.scale_y {
-        Some(y) => { y },
-        None => { 1.0 }
+        Some(y) => y,
+        None => 1.0,
     };
     for road_lane in settings.road_lanes.iter() {
         let mut polygon = Zone::from(road_lane);
-        polygon.scale_geom(scale_x, scale_y);    
+        polygon.scale_geom(scale_x, scale_y);
         polygon.set_target_classes(COCO_FILTERED_CLASSNAMES);
         match data_storage.write().unwrap().insert_zone(polygon) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(err) => {
                 panic!("Can't insert zone due the error {:?}", err);
             }
@@ -216,13 +206,14 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
         println!("Ctrl+C has been pressed! Exit in 2 seconds");
         thread::sleep(STDDuration::from_secs(2));
         process::exit(1);
-    }).expect("Error setting `Ctrl-C` handler");
+    })
+    .expect("Error setting `Ctrl-C` handler");
 
     /* Start statistics ("threading" is obsolete because of business-logic error) */
     let reset_time = settings.worker.reset_data_milliseconds;
     let next_reset = reset_time as f32 / 1000.0;
     let ds_worker = data_storage.clone();
-    
+
     /* Redis publisher */
     let redis_enabled = settings.redis_publisher.enable;
     let redis_worker = data_storage.clone();
@@ -234,32 +225,40 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
             let redis_db_index = settings.redis_publisher.db_index;
             let redis_channel = settings.redis_publisher.channel_name.to_owned();
             let mut redis_conn = match redis_password.chars().count() {
-                0 => {
-                    RedisConnection::new(redis_host, redis_port, redis_db_index, redis_worker)
-                },
-                _ => {
-                    RedisConnection::new_with_password(redis_host, redis_port, redis_db_index, redis_password, redis_worker)
-                }
+                0 => RedisConnection::new(redis_host, redis_port, redis_db_index, redis_worker),
+                _ => RedisConnection::new_with_password(
+                    redis_host,
+                    redis_port,
+                    redis_db_index,
+                    redis_password,
+                    redis_worker,
+                ),
             };
             if redis_channel.chars().count() != 0 {
                 redis_conn.set_channel(redis_channel);
             }
             Some(redis_conn)
-        },
-        false => {
-            None
         }
+        false => None,
     };
 
-    /* Start REST API if needed */ 
+    /* Start REST API if needed */
     let overwrite_file = path_to_config.to_string();
     let (tx_mjpeg, rx_mjpeg) = mpsc::sync_channel(0);
     if settings.rest_api.enable {
         let settings_clone = settings.clone();
         let ds_api = data_storage.clone();
         thread::spawn(move || {
-            match rest_api::start_rest_api(settings_clone.rest_api.host.clone(), settings_clone.rest_api.back_end_port, ds_api, enable_mjpeg, rx_mjpeg, settings_clone, &overwrite_file) {
-                Ok(_) => {},
+            match rest_api::start_rest_api(
+                settings_clone.rest_api.host.clone(),
+                settings_clone.rest_api.back_end_port,
+                ds_api,
+                enable_mjpeg,
+                rx_mjpeg,
+                settings_clone,
+                &overwrite_file,
+            ) {
+                Ok(_) => {}
                 Err(err) => {
                     println!("Can't start API due the error: {:?}", err)
                 }
@@ -268,10 +267,11 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
     }
 
     /* Probe video */
-    let mut video_capture = get_video_capture(&settings.input.video_src, settings.input.typ.clone());
+    let mut video_capture =
+        get_video_capture(&settings.input.video_src, settings.input.typ.clone());
     let opened = VideoCapture::is_opened(&video_capture).map_err(|err| AppError::from(err))?;
     if !opened {
-        return Err(AppError::VideoError(AppVideoError{typ: 1}))
+        return Err(AppError::VideoError(AppVideoError { typ: 1 }));
     }
     let (width, height, fps) = probe_video(&mut video_capture)?;
     println!("Video probe: {{Width: {width}px | Height: {height}px | FPS: {fps}}}");
@@ -281,21 +281,27 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
     let output_height: i32 = settings.output.height;
     if settings.output.enable {
         match named_window(window, 1) {
-            Ok(_) => {},
-            Err(err) =>{
-                panic!("Can't give a name to output window due the error: {:?}", err)
+            Ok(_) => {}
+            Err(err) => {
+                panic!(
+                    "Can't give a name to output window due the error: {:?}",
+                    err
+                )
             }
         };
         match resize_window(window, output_width, output_height) {
-            Ok(_) => {},
-            Err(err) =>{
+            Ok(_) => {}
+            Err(err) => {
                 panic!("Can't resize output window due the error: {:?}", err)
             }
         }
     }
 
     /* Start capture loop */
-    let (tx_capture, rx_capture): (mpsc::SyncSender<ThreadedFrame>, mpsc::Receiver<ThreadedFrame>) = mpsc::sync_channel(0);
+    let (tx_capture, rx_capture): (
+        mpsc::SyncSender<ThreadedFrame>,
+        mpsc::Receiver<ThreadedFrame>,
+    ) = mpsc::sync_channel(0);
     thread::spawn(move || {
         let mut frames_counter: f32 = 0.0;
         let mut total_seconds: f32 = 0.0;
@@ -307,7 +313,7 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
         loop {
             let mut read_frame = Mat::default();
             match video_capture.read(&mut read_frame) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(_) => {
                     println!("Can't read next frame");
                     break;
@@ -320,7 +326,7 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
                 empty_frames_countrer += 1;
                 if empty_frames_countrer >= EMPTY_FRAMES_LIMIT {
                     println!("Too many empty frames");
-                    break
+                    break;
                 }
                 continue;
             }
@@ -335,15 +341,14 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
             }
             // println!("Frame {frames_counter} | Second: {total_seconds} | Fraction: {second_fraction}");
 
-
             /* Send frame and capture info */
-            let frame = ThreadedFrame{
+            let frame = ThreadedFrame {
                 frame: read_frame,
                 current_second: second_fraction,
             };
 
             match tx_capture.send(frame) {
-                Ok(_)=>{},
+                Ok(_) => {}
                 Err(_err) => {
                     // Closed channel?
                     // println!("Error on send frame to detection thread: {}", _err)
@@ -352,24 +357,29 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
 
             // println!("Total seconds: {}", total_seconds);
             if total_seconds >= next_reset {
-                println!("Reset timer due analytics. Current local time is: {}", second_fraction);
+                println!(
+                    "Reset timer due analytics. Current local time is: {}",
+                    second_fraction
+                );
                 total_seconds = 0.0;
                 let mut ds_writer = ds_worker.write().expect("Bad DS");
                 if ds_writer.period_end == ds_writer.period_start {
                     // First iteration
                     ds_writer.period_end = Utc::now();
-                    ds_writer.period_start = ds_writer.period_end - chrono::Duration::milliseconds(reset_time);
+                    ds_writer.period_start =
+                        ds_writer.period_end - chrono::Duration::milliseconds(reset_time);
                 } else {
                     // Next iterations
                     ds_writer.period_start = ds_writer.period_end;
-                    ds_writer.period_end = ds_writer.period_end + chrono::Duration::milliseconds(reset_time);
+                    ds_writer.period_end =
+                        ds_writer.period_end + chrono::Duration::milliseconds(reset_time);
                 }
-                
+
                 match ds_writer.update_statistics() {
                     Ok(_) => {
                         // Do not forget to drop mutex explicitly since we possible need to work with DS in REST API and Redis
                         drop(ds_writer)
-                    },
+                    }
                     Err(err) => {
                         println!("Can't update statistics due the error: {}", err);
                     }
@@ -382,7 +392,7 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
         match video_capture.release() {
             Ok(_) => {
                 println!("Video capture has been closed successfully");
-            },
+            }
             Err(err) => {
                 println!("Can't release video capturer due the error: {}", err);
             }
@@ -400,36 +410,40 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
     let mut resized_frame = Mat::default();
 
     let ds_tracker = data_storage.clone();
-    
-    let tracker_dt = (1.0/fps) as f32;
+
+    let tracker_dt = (1.0 / fps) as f32;
 
     /* Can't create colors as const/static currently */
     let trajectory_scalar: Scalar = Scalar::from((0.0, 255.0, 0.0));
     let trajectory_scalar_inverse: Scalar = draw::invert_color(&trajectory_scalar);
     let bbox_scalar: Scalar = Scalar::from((0.0, 255.0, 0.0));
-    let bbox_scalar_inverse:Scalar = draw::invert_color(&bbox_scalar);
+    let bbox_scalar_inverse: Scalar = draw::invert_color(&bbox_scalar);
     let id_scalar: Scalar = Scalar::from((0.0, 255.0, 0.0));
     let id_scalar_inverse: Scalar = draw::invert_color(&id_scalar);
     for received in rx_capture {
         // println!("Received frame from capture thread: {}", received.current_second);
         let mut frame = received.frame.clone();
-        let blobimg = blob_from_image(&frame, BLOB_SCALE, net_size, blob_mean, true, false, CV_32F)?;
+        let blobimg =
+            blob_from_image(&frame, BLOB_SCALE, net_size, blob_mean, true, false, CV_32F)?;
         match neural_net.set_input(&blobimg, BLOB_NAME, 1.0, blob_mean) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(err) => {
                 println!("Can't set input of neural network due the error {:?}", err);
                 continue;
             }
         };
-        
+
         match neural_net.forward(&mut detections, &neural_net_out_layers) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(err) => {
-                println!("Can't process input of neural network due the error {:?}", err);
+                println!(
+                    "Can't process input of neural network due the error {:?}",
+                    err
+                );
                 continue;
             }
         }
-        
+
         /* Process detected objects and match them to existing ones */
         let mut tmp_detections = process_yolo_detections(
             &detections,
@@ -444,7 +458,7 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
         );
 
         match tracker.match_objects(&mut tmp_detections, received.current_second) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(err) => {
                 println!("Can't match objects due the error: {:?}", err);
                 continue;
@@ -452,9 +466,12 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
         };
 
         let ds_guard = ds_tracker.read().expect("DataStorage is poisoned [RWLock]");
-        let zones = ds_guard.zones.read().expect("Spatial data is poisoned [RWLock]");
-        
-        // Reset current occupancy for zones 
+        let zones = ds_guard
+            .zones
+            .read()
+            .expect("Spatial data is poisoned [RWLock]");
+
+        // Reset current occupancy for zones
         let current_ut = get_sys_time_in_secs();
         for (_, zone_guarded) in zones.iter() {
             let mut zone = zone_guarded.lock().expect("Zone is poisoned [Mutex]");
@@ -481,19 +498,40 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
             for (_, zone_guarded) in zones.iter() {
                 let mut zone = zone_guarded.lock().expect("Zone is poisoned [Mutex]");
                 if !zone.contains_point(last_point.x, last_point.y) {
-                    continue
+                    continue;
                 }
                 zone.current_statistics.occupancy += 1; // Increment current load to match number of objects in zone
                 let projected_pt = zone.project_to_skeleton(last_point.x, last_point.y);
                 let pixels_per_meters = zone.get_skeleton_ppm();
                 match object_extra.spatial_info {
                     Some(ref mut spatial_info) => {
-                        spatial_info.update_avg(last_time, last_point.x, last_point.y, projected_pt.0, projected_pt.1, pixels_per_meters);
-                        zone.register_or_update_object(object_id.clone(), spatial_info.speed, object_extra.get_classname());
-                    },
+                        spatial_info.update_avg(
+                            last_time,
+                            last_point.x,
+                            last_point.y,
+                            projected_pt.0,
+                            projected_pt.1,
+                            pixels_per_meters,
+                        );
+                        zone.register_or_update_object(
+                            object_id.clone(),
+                            spatial_info.speed,
+                            object_extra.get_classname(),
+                        );
+                    }
                     None => {
-                        object_extra.spatial_info = Some(SpatialInfo::new(last_time, last_point.x, last_point.y, projected_pt.0, projected_pt.1));
-                        zone.register_or_update_object(object_id.clone(), -1.0, object_extra.get_classname());
+                        object_extra.spatial_info = Some(SpatialInfo::new(
+                            last_time,
+                            last_point.x,
+                            last_point.y,
+                            projected_pt.0,
+                            projected_pt.1,
+                        ));
+                        zone.register_or_update_object(
+                            object_id.clone(),
+                            -1.0,
+                            object_extra.get_classname(),
+                        );
                     }
                 }
             }
@@ -510,18 +548,30 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
         // We need drop here explicitly, since we need to release lock on zones for MJPEG / REST API / Redis publisher and statistics threads
         drop(zones);
         drop(ds_guard);
-        
+
         /* Imshow + re-stream input video as MJPEG */
         if enable_mjpeg || settings.output.enable {
-            draw::draw_trajectories(&mut frame, &tracker, trajectory_scalar, trajectory_scalar_inverse);
+            draw::draw_trajectories(
+                &mut frame,
+                &tracker,
+                trajectory_scalar,
+                trajectory_scalar_inverse,
+            );
             draw::draw_bboxes(&mut frame, &tracker, bbox_scalar, bbox_scalar_inverse);
             draw::draw_identifiers(&mut frame, &tracker, id_scalar, id_scalar_inverse);
             draw::draw_speeds(&mut frame, &tracker, id_scalar, id_scalar_inverse);
             draw::draw_projections(&mut frame, &tracker, id_scalar, id_scalar_inverse);
-            
+
             if settings.output.enable {
-                match resize(&mut frame, &mut resized_frame, Size::new(output_width, output_height), 1.0, 1.0, 1) {
-                    Ok(_) => {},
+                match resize(
+                    &mut frame,
+                    &mut resized_frame,
+                    Size::new(output_width, output_height),
+                    1.0,
+                    1.0,
+                    1,
+                ) {
+                    Ok(_) => {}
                     Err(err) => {
                         panic!("Can't resize output frame due the error {:?}", err);
                     }
@@ -530,7 +580,9 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
                     imshow(window, &mut resized_frame)?;
                 }
                 let key = wait_key(10)?;
-                if key == 27 /* esc */ || key == 115 /* s */ || key == 83 /* S */ {
+                if key == 27 /* esc */ || key == 115 /* s */ || key == 83
+                /* S */
+                {
                     break;
                 }
             }
@@ -544,14 +596,12 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
                 continue;
             }
             match tx_mjpeg.send(buffer) {
-                Ok(_)=>{},
+                Ok(_) => {}
                 Err(_err) => {
                     println!("Error on send frame to MJPEG thread: {}", _err)
                 }
             };
         }
-
-        
     }
     Ok(())
 }
@@ -559,9 +609,7 @@ fn run(settings: &AppSettings, path_to_config: &str, tracker: &mut Tracker, neur
 fn main() {
     let args: Vec<String> = env::args().collect();
     let path_to_config = match args.len() {
-        2 => {
-            &args[1]
-        },
+        2 => &args[1],
         _ => {
             println!("Args should contain exactly one string: path to TOML configuration file. Setting to default './data/conf.toml'");
             "./data/conf.toml"
@@ -573,21 +621,28 @@ fn main() {
     let mut tracker = Tracker::new(15, 0.3);
     println!("Tracker is:\n\t{}", tracker);
 
-    let mut neural_net = match prepare_neural_net(&app_settings.detection.network_weights, &app_settings.detection.network_cfg) {
+    let mut neural_net = match prepare_neural_net(&app_settings.detection.model) {
         Ok(nn) => nn,
         Err(err) => {
             println!("Can't prepare neural network due the error: {}", err);
-            return
+            return;
         }
     };
 
     let verbose = match &app_settings.debug {
-        Some(x) => { x.enable },
-        None => { false }
+        Some(x) => x.enable,
+        None => false,
     };
-    
-    match run(&app_settings, path_to_config, &mut tracker, &mut neural_net.0, neural_net.1, verbose) {
-        Ok(_) => {},
+
+    match run(
+        &app_settings,
+        path_to_config,
+        &mut tracker,
+        &mut neural_net.0,
+        neural_net.1,
+        verbose,
+    ) {
+        Ok(_) => {}
         Err(_err) => {
             println!("Error in main thread: {}", _err);
         }
